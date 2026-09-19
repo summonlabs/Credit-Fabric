@@ -1,0 +1,58 @@
+# Build trees
+build/
+build-*/
+out/
+install/
+_stage/
+cmake-build-*/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+*.cmake.stamp
+
+# Compiler / linker artefacts
+*.obj
+*.o
+*.a
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.idb
+*.exe
+*.dll
+*.so
+*.dylib
+*.dSYM/
+*.gcda
+*.gcno
+*.gcov
+
+# Crash / diagnostic debris
+*.dmp
+*.mdmp
+*.log
+core
+core.*
+
+# Editors / OS
+.vs/
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+desktop.ini
+
+# Local scratch
+scratch/
+tmp/
+*.tmp
+
+# Staged install prefix used by the install/consume validation
+stage/
