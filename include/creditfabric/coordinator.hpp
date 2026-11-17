@@ -60,13 +60,19 @@ class CoordinatorServer {
  private:
   void accept_loop();
   void serve_connection(Socket socket, std::uint32_t session);
-  void register_connection(std::thread worker);
+  void register_connection(std::thread worker, std::shared_ptr<std::atomic<bool>> exited);
 
   CreditEngine& engine_;
   CoordinatorOptions options_;
   Listener listener_;
   mutable std::mutex registry_mutex_;  ///< guards workers_ only; leaf lock
-  std::vector<std::thread> workers_;
+  /// A connection thread sets its flag as its last act; finished threads are
+  /// joined and dropped when the next connection is registered.
+  struct Worker {
+    std::thread thread;
+    std::shared_ptr<std::atomic<bool>> exited;
+  };
+  std::vector<Worker> workers_;
   std::atomic<bool> running_{false};
   std::atomic<bool> stopping_{false};
   std::atomic<std::uint64_t> accepted_{0};

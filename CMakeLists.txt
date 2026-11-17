@@ -59,8 +59,10 @@ if(MSVC)
     target_compile_options(creditfabric PRIVATE /WX)
   endif()
   if(CREDITFABRIC_ENABLE_ASAN)
-    target_compile_options(creditfabric PUBLIC /fsanitize=address)
-    target_link_options(creditfabric PUBLIC /fsanitize=address)
+    # Debug information is required: without it MSVC warns C5072, which /WX
+    # turns into an error, so the sanitized build did not compile.
+    target_compile_options(creditfabric PUBLIC /fsanitize=address /Zi)
+    target_link_options(creditfabric PUBLIC /fsanitize=address /INCREMENTAL:NO /DEBUG)
   endif()
 else()
   target_compile_options(creditfabric PRIVATE -Wall -Wextra -Wpedantic -Wshadow -Wconversion)

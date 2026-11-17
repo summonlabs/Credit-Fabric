@@ -9,7 +9,11 @@
 //   - a huge externally supplied count had to be refused, not wrapped.
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <string>
@@ -262,6 +266,86 @@ CF_TEST(a_malformed_frame_never_reaches_the_authority) {
   CHECK_EQ(fixture.engine->stats().attempts_applied, applied_before);
   CHECK_EQ(fixture.view().issued, 0ull);
   CHECK(server.stop().ok());
+}
+
+CF_TEST(finished_connections_give_their_slot_back) {
+  cftest::Fixture fixture;
+  REQUIRE(fixture.recover().ok());
+  REQUIRE(fixture.open(1000).ok());
+  CoordinatorOptions options{};
+  options.max_connections = 4;
+  CoordinatorServer server(*fixture.engine, options);
+  REQUIRE(server.start().ok());
+  // Each connection is closed before the next one starts, so only the most
+  // recent ones can still be winding down when the next connects. The bound
+  // counts live connections, so every one of them must be served.
+  int connected = 0;
+  for (int index = 0; index < 12; ++index) {
+    ClientOptions client_options{};
+    client_options.port = server.port();
+    client_options.domain = DomainId{0xD0A1ull};
+    client_options.publisher = PublisherId{0xD00Dull};
+    client_options.boot = BootId{make_boot_id()};
+    CoordinatorClient client(client_options);
+    if (client.connect().ok()) ++connected;
+    client.close();
+  }
+  CHECK(server.stop().ok());
+  CHECK(connected == 12);
+}
+
+CF_TEST(a_second_server_cannot_take_a_listening_port) {
+  cftest::Fixture fixture;
+  REQUIRE(fixture.recover().ok());
+  REQUIRE(fixture.open(1000).ok());
+  CoordinatorServer first(*fixture.engine, CoordinatorOptions{});
+  REQUIRE(first.start().ok());
+  CoordinatorOptions options{};
+  options.port = first.port();
+  CoordinatorServer second(*fixture.engine, options);
+  // Two coordinators must never share one listening port: the second start fails.
+  const bool second_started = second.start().ok();
+  if (second_started) {
+    (void)second.stop();
+  }
+  CHECK(first.stop().ok());
+  CHECK(!second_started);
+}
+
+CF_TEST(an_atomic_replace_waits_for_a_reader_to_close) {
+  const std::filesystem::path directory =
+      std::filesystem::temp_directory_path() / "creditfabric-replace-reader";
+  std::error_code error;
+  std::filesystem::remove_all(directory, error);
+  std::filesystem::create_directories(directory, error);
+  const std::string target = (directory / "snapshot.bin").string();
+  const std::string temporary = (directory / "snapshot.bin.tmp").string();
+  { std::ofstream(target, std::ios::binary) << "FIRST"; }
+  { std::ofstream(temporary, std::ios::binary) << "SECOND"; }
+  bool reader_opened = false;
+  bool replaced = false;
+  {
+    // Another tool reading the store (an inspection, a scan) holds the file
+    // open while it is replaced, and closes it shortly after.
+    std::ifstream reader(target, std::ios::binary);
+    reader_opened = reader.is_open();
+    std::thread writer([&target, &temporary, &replaced] {
+      replaced = atomic_replace_file(temporary, target).ok();
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    reader.close();
+    writer.join();
+  }
+  std::string stored;
+  {
+    std::ifstream in(target, std::ios::binary);
+    stored.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+  }
+  std::filesystem::remove_all(directory, error);
+  CHECK(reader_opened);
+  // The write is not lost because a reader had the file open for a moment.
+  CHECK(replaced);
+  CHECK(stored == "SECOND");
 }
 
 CF_TEST_MAIN()

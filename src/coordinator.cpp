@@ -62,30 +62,50 @@ Status CoordinatorServer::stop() {
   // that holds a connection open and idle cannot keep shutdown waiting.
 
   // Drain the worker list without holding the registry lock across a join.
-  std::vector<std::thread> workers;
+  std::vector<Worker> workers;
   {
     std::lock_guard<std::mutex> guard(registry_mutex_);
     workers.swap(workers_);
   }
-  for (std::thread& worker : workers) {
-    if (worker.joinable()) worker.join();
+  for (Worker& worker : workers) {
+    if (worker.thread.joinable()) worker.thread.join();
   }
   running_.store(false, std::memory_order_release);
   return Status::success();
 }
 
 std::size_t CoordinatorServer::active_connections() const {
+  // Only live connections count against the limit; a finished one has given
+  // its slot back even before its thread is reaped.
   std::lock_guard<std::mutex> guard(registry_mutex_);
-  return workers_.size();
+  std::size_t live = 0;
+  for (const Worker& worker : workers_) {
+    if (!worker.exited->load(std::memory_order_acquire)) ++live;
+  }
+  return live;
 }
 
-void CoordinatorServer::register_connection(std::thread worker) {
-  // The list stays bounded: a connection is only accepted while the list is
-  // shorter than the configured limit, and every worker is joined by stop().
-  // The registry lock is a leaf: it is never held across a socket operation, an
-  // engine call, or a join.
-  std::lock_guard<std::mutex> guard(registry_mutex_);
-  workers_.push_back(std::move(worker));
+void CoordinatorServer::register_connection(std::thread worker,
+                                            std::shared_ptr<std::atomic<bool>> exited) {
+  // Finished workers are taken out of the list here and joined outside the
+  // registry lock, which stays a leaf: it is never held across a socket
+  // operation, an engine call, or a join.
+  std::vector<std::thread> finished;
+  {
+    std::lock_guard<std::mutex> guard(registry_mutex_);
+    for (auto it = workers_.begin(); it != workers_.end();) {
+      if (it->exited->load(std::memory_order_acquire)) {
+        finished.push_back(std::move(it->thread));
+        it = workers_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    workers_.push_back(Worker{std::move(worker), std::move(exited)});
+  }
+  for (std::thread& thread : finished) {
+    if (thread.joinable()) thread.join();
+  }
 }
 
 void CoordinatorServer::accept_loop() {
@@ -103,8 +123,12 @@ void CoordinatorServer::accept_loop() {
     socket.set_nodelay(true);
     const std::uint32_t session = next_session_.fetch_add(1, std::memory_order_relaxed);
     accepted_.fetch_add(1, std::memory_order_relaxed);
-    std::thread worker(&CoordinatorServer::serve_connection, this, std::move(socket), session);
-    register_connection(std::move(worker));
+    auto exited = std::make_shared<std::atomic<bool>>(false);
+    std::thread worker([this, socket = std::move(socket), session, exited]() mutable {
+      serve_connection(std::move(socket), session);
+      exited->store(true, std::memory_order_release);
+    });
+    register_connection(std::move(worker), std::move(exited));
   }
 }
 

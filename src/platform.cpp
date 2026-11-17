@@ -43,10 +43,26 @@ Status durable_flush(void* file_handle) {
 
 Status atomic_replace_file(const std::string& source, const std::string& destination) {
 #if defined(_WIN32)
-  if (::MoveFileExA(source.c_str(), destination.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) == 0) {
-    return Status::refused(Reason::IoError, static_cast<std::uint64_t>(::GetLastError()));
+  // While a reader has the destination open (an inspection, an antivirus or
+  // indexing scan) the replacement fails until the reader closes the file, so
+  // it is retried for a bounded time (about 2 s) instead of failing the write.
+  // A directory in the way is not transient and fails at once.
+  for (int attempt = 0;; ++attempt) {
+    if (::MoveFileExA(source.c_str(), destination.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0) {
+      return Status::success();
+    }
+    const DWORD code = ::GetLastError();
+    const DWORD attributes = ::GetFileAttributesA(destination.c_str());
+    const bool directory =
+        attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    const bool transient = (code == ERROR_ACCESS_DENIED || code == ERROR_SHARING_VIOLATION ||
+                            code == ERROR_LOCK_VIOLATION) &&
+                           !directory;
+    if (!transient || attempt >= 100) {
+      return Status::refused(Reason::IoError, static_cast<std::uint64_t>(code));
+    }
+    ::Sleep(20);
   }
-  return Status::success();
 #else
   if (::rename(source.c_str(), destination.c_str()) != 0) return Status::refused(Reason::IoError);
   // Durably record the rename in the containing directory when the platform allows it.
